@@ -2,8 +2,8 @@
 
 from datetime import date
 
-SEC_EDGAR_SEARCH_API_ENDPOINT = "https://efts.sec.gov/LATEST/search-index"
 SEC_EDGAR_ARCHIVES_BASE_URL = "https://www.sec.gov/Archives/edgar/data"
+SEC_EDGAR_SUBMISSIONS_API_BASE_URL = "https://data.sec.gov/submissions"
 
 # SEC limits users to no more than 10 requests per second
 # Sleep 0.1s between each request to prevent rate-limiting
@@ -13,9 +13,13 @@ SEC_EDGAR_RATE_LIMIT_SLEEP_INTERVAL = 0.1
 # Number of times to retry a request to sec.gov
 MAX_RETRIES = 10
 
+# Max rate of 10 requests/second
+# Source: https://www.sec.gov/os/accessing-edgar-data
+MAX_REQUESTS_PER_SECOND = 10
+
 DATE_FORMAT_TOKENS = "%Y-%m-%d"
 DEFAULT_BEFORE_DATE = date.today()
-DEFAULT_AFTER_DATE = date(2000, 1, 1)
+DEFAULT_AFTER_DATE = date(1994, 1, 1)
 
 ROOT_SAVE_FOLDER_NAME = "sec-edgar-filings"
 FILING_FULL_SUBMISSION_FILENAME = "full-submission.txt"
