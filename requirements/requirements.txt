@@ -4,3 +4,5 @@ lxml
 pandas
 pyrate-limiter
 requests
+sec-cik-mapper
+typing_extensions

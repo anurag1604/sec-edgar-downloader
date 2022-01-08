@@ -1,17 +1,19 @@
 """Provides a :class:`Downloader` class for downloading SEC EDGAR filings."""
 
-import sys
 from pathlib import Path
-from typing import ClassVar, List, Optional, Union
+from typing import ClassVar, List, Optional, Union, Dict
 
 from ._constants import DATE_FORMAT_TOKENS, DEFAULT_AFTER_DATE, DEFAULT_BEFORE_DATE
-from ._constants import SUPPORTED_FILINGS as _SUPPORTED_FILINGS
+from ._constants import SUPPORTED_FORMS as _SUPPORTED_FORMS
 from ._utils import (
     download_filings,
     get_filings_to_download,
     is_cik,
     validate_date_format,
+    validate_forms,
 )
+
+from sec_cik_mapper import StockMapper, MutualFundMapper
 
 
 class Downloader:
@@ -31,7 +33,9 @@ class Downloader:
         >>> dl = Downloader("/path/to/valid/save/location")
     """
 
-    supported_filings: ClassVar[List[str]] = sorted(_SUPPORTED_FILINGS)
+    ticker_to_cik_mapping: ClassVar[Dict[str, str]] = None
+
+    supported_forms: ClassVar[List[str]] = sorted(_SUPPORTED_FORMS)
 
     def __init__(self, download_folder: Union[str, Path, None] = None) -> None:
         """Constructor for the :class:`Downloader` class."""
@@ -42,29 +46,50 @@ class Downloader:
         else:
             self.download_folder = Path(download_folder).expanduser().resolve()
 
+    def _convert_ticker_to_cik(self, ticker: str) -> str:
+        # Initialize and cache ticker_to_cik_mapping
+        if self.ticker_to_cik_mapping is None:
+            stock_mapper = StockMapper()
+            mutual_fund_mapper = MutualFundMapper()
+            self.ticker_to_cik_mapping = dict(
+                stock_mapper.ticker_to_cik,
+                **mutual_fund_mapper.ticker_to_cik,
+            )
+
+        cik = self.ticker_to_cik_mapping.get(ticker)
+
+        if cik is None:
+            raise ValueError(
+                f"Unable to convert the ticker {ticker!r} to a CIK. "
+                "Please use the official SEC CIK lookup tool to find the CIK and retry the download: "
+                "sec.gov/edgar/searchedgar/cik.htm"
+            )
+
+        return cik
+
     def get(
         self,
-        filing: str,
+        forms: Union[str, List[str]],
         ticker_or_cik: str,
         *,
         amount: Optional[int] = None,
-        after: Optional[str] = None,
-        before: Optional[str] = None,
-        include_amends: bool = False,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        include_amends: bool = True,
         download_details: bool = True,
     ) -> int:
         """Download filings and save them to disk.
 
-        :param filing: filing type to download (e.g. 8-K).
+        :param forms: filing types to download (e.g. 8-K, 10-K).
         :param ticker_or_cik: ticker or CIK to download filings for.
         :param amount: number of filings to download.
             Defaults to all available filings.
-        :param after: date of form YYYY-MM-DD after which to download filings.
-            Defaults to 2000-01-01, the earliest date supported by EDGAR full text search.
-        :param before: date of form YYYY-MM-DD before which to download filings.
+        :param start_date: start date of form YYYY-MM-DD after which to download filings.
+            Defaults to 1994-01-01, the earliest date supported by EDGAR.
+        :param end_date: end date of form YYYY-MM-DD before which to download filings.
             Defaults to today.
         :param include_amends: denotes whether or not to include filing amends (e.g. 8-K/A).
-            Defaults to False.
+            Defaults to True.
         :param download_details: denotes whether or not to download human-readable and easily
             parseable filing detail documents (e.g. form 4 XML, 8-K HTML). Defaults to True.
         :return: number of filings downloaded.
@@ -115,63 +140,55 @@ class Downloader:
             if len(ticker_or_cik) > 10:
                 raise ValueError("Invalid CIK. CIKs must be at most 10 digits long.")
             # Pad CIK with 0s to ensure that it is exactly 10 digits long
-            # The SEC Edgar Search API requires zero-padded CIKs to ensure
-            # that search results are accurate. Relates to issue #84.
-            ticker_or_cik = ticker_or_cik.zfill(10)
+            # The SEC EDGAR API requires zero-padded CIKs
+            cik = ticker_or_cik.zfill(10)
+        else:
+            cik = self._convert_ticker_to_cik(ticker_or_cik)
 
         if amount is not None:
             amount = max(int(amount), 1)
 
-        # SEC allows for filing searches from 2000 onwards
-        if after is None:
-            after = DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS)
+        # SEC allows for filing searches from 1994 onwards
+        if start_date is None:
+            start_date = DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS)
         else:
-            validate_date_format(after)
+            validate_date_format(start_date)
 
-            if after < DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS):
+            if start_date < DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS):
                 raise ValueError(
                     f"Filings cannot be downloaded prior to {DEFAULT_AFTER_DATE.year}. "
                     f"Please enter a date on or after {DEFAULT_AFTER_DATE}."
                 )
 
-        if before is None:
-            before = DEFAULT_BEFORE_DATE.strftime(DATE_FORMAT_TOKENS)
+        if end_date is None:
+            end_date = DEFAULT_BEFORE_DATE.strftime(DATE_FORMAT_TOKENS)
         else:
-            validate_date_format(before)
+            validate_date_format(end_date)
 
-        if after > before:
+        if start_date > end_date:
             raise ValueError(
                 "Invalid after and before date combination. "
                 "Please enter an after date that is less than the before date."
             )
 
-        if filing not in _SUPPORTED_FILINGS:
-            filing_options = ", ".join(self.supported_filings)
-            raise ValueError(
-                f"'{filing}' filings are not supported. "
-                f"Please choose from the following: {filing_options}."
-            )
+        if isinstance(forms, str):
+            forms = [forms]
 
-        # TODO: at this point we should have a cik (no ticker)
-        cik = ticker_or_cik
+        validate_forms(forms)
 
-        # TODO: make filing into forms (str or list(str))
-        forms = filing
-
-        filings = get_filings_to_download(
+        filings_to_download = get_filings_to_download(
             forms,
             cik,
             amount,
-            after,
-            before,
+            start_date,
+            end_date,
             include_amends,
         )
 
         num_unique_filings_downloaded = download_filings(
             self.download_folder,
             cik,
-            forms,
-            filings,
+            filings_to_download,
             download_details,
         )
 

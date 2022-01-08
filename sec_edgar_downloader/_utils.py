@@ -1,6 +1,5 @@
 """Utility functions for the downloader class."""
-import time
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
@@ -24,6 +23,7 @@ from ._constants import (
     SEC_EDGAR_ARCHIVES_BASE_URL,
     SEC_EDGAR_RATE_LIMIT_SLEEP_INTERVAL,
     SEC_EDGAR_SUBMISSIONS_API_BASE_URL,
+    SUPPORTED_FORMS,
 )
 
 # Store metadata about filing to download
@@ -111,16 +111,13 @@ def get_submissions_for_cik(query_cik: str) -> pd.DataFrame:
 
 
 def get_filings_to_download(
-    forms: Union[str, List[str]],
+    forms: List[str],
     cik: str,
     amount: int,
     start_date: str,
     end_date: str,
     include_amends: bool,
-) -> List[FilingMetadata]:
-    if isinstance(forms, str):
-        forms = [forms]
-
+) -> pd.DataFrame:
     submissions = get_submissions_for_cik(cik)
     filtered_submissions = filter_dataframe(
         submissions, forms, amount, start_date, end_date, include_amends
@@ -172,10 +169,16 @@ def filter_dataframe(
     return submissions[mask] if amount is None else submissions[mask][:amount]
 
 
+# def form_download_urls(cik: str, filings_to_download: pd.DataFrame) -> pd.DataFrame:
+#     defaultdict(list)
+#     for filing in filings_to_download.itertuples():
+#         metadata = get_filing_metadata_from_df_row(cik, filing)
+#     pass
+
+
 def download_filings(
     download_folder: Path,
     cik: str,
-    filing_type: str,
     filings_to_download: pd.DataFrame,
     include_filing_details: bool,
 ) -> int:
@@ -200,14 +203,14 @@ def download_filings(
                     download_folder,
                     cik,
                     filing.accessionNumber,
-                    filing_type,
+                    filing.form,
                     metadata.full_submission_url,
                     FILING_FULL_SUBMISSION_FILENAME,
                 )
             except requests.exceptions.HTTPError as e:  # pragma: no cover
                 print(
                     "Skipping full submission download for "
-                    f"'{filing.accessionNumber}' due to network error: {e}."
+                    f"{filing.accessionNumber!r} due to network error: {e}."
                 )
 
             if include_filing_details and metadata.filing_details_url is not None:
@@ -217,7 +220,7 @@ def download_filings(
                         download_folder,
                         cik,
                         filing.accessionNumber,
-                        filing_type,
+                        filing.form,
                         metadata.filing_details_url,
                         metadata.filing_details_filename,
                         resolve_urls=True,
@@ -225,14 +228,14 @@ def download_filings(
                 except requests.exceptions.HTTPError as e:  # pragma: no cover
                     print(
                         f"Skipping filing detail download for "
-                        f"'{filing.accessionNumber}' due to network error: {e}."
+                        f"{filing.accessionNumber!r} due to network error: {e}."
                     )
         return filings_to_download.accessionNumber.nunique()
     finally:
         client.close()
 
 
-def resolve_relative_urls_in_filing(filing_text: bytes, download_url: str) -> str:
+def resolve_relative_urls_in_filing(filing_text: bytes, download_url: str) -> Union[str, BeautifulSoup]:
     soup = BeautifulSoup(filing_text, "lxml")
     base_url = f"{download_url.rsplit('/', 1)[0]}/"
 
@@ -291,3 +294,13 @@ def is_cik(ticker_or_cik: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def validate_forms(forms: List[str]) -> None:
+    unsupported_forms = set(forms) - SUPPORTED_FORMS
+    if unsupported_forms:
+        filing_options = ", ".join(sorted(SUPPORTED_FORMS))
+        raise ValueError(
+            f"{','.join(unsupported_forms)!r} filings are not supported. "
+            f"Please choose from the following: {filing_options}."
+        )

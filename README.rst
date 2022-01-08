@@ -114,6 +114,16 @@ Advanced Usage
         for filing_type in dl.supported_filings:
             dl.get(filing_type, equity_id, amount=1)
 
+Contributing
+------------
+
+If you encounter a bug or would like to see a new company filing or feature added to **sec-edgar-downloader**, please `file an issue <https://github.com/jadchaar/sec-edgar-downloader/issues>`_ or `submit a pull request <https://help.github.com/en/articles/creating-a-pull-request>`_.
+
+Documentation
+-------------
+
+For full documentation, please visit `sec-edgar-downloader.readthedocs.io <https://sec-edgar-downloader.readthedocs.io>`_.
+
 Supported SEC Filing Types
 --------------------------
 
@@ -472,13 +482,3 @@ Below is an exhaustive list of all filings types that can be downloaded by this 
 - UPLOAD
 - WDL-REQ
 - X-17A-5
-
-Contributing
-------------
-
-If you encounter a bug or would like to see a new company filing or feature added to **sec-edgar-downloader**, please `file an issue <https://github.com/jadchaar/sec-edgar-downloader/issues>`_ or `submit a pull request <https://help.github.com/en/articles/creating-a-pull-request>`_.
-
-Documentation
--------------
-
-For full documentation, please visit `sec-edgar-downloader.readthedocs.io <https://sec-edgar-downloader.readthedocs.io>`_.
