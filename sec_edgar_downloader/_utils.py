@@ -1,9 +1,9 @@
 """Utility functions for the downloader class."""
-from collections import namedtuple, defaultdict
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
-from urllib.parse import urljoin
+from typing import List, Optional, Tuple, Union
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -15,6 +15,8 @@ from urllib3.util.retry import Retry
 
 from ._constants import (
     DATE_FORMAT_TOKENS,
+    DEFAULT_AFTER_DATE,
+    DEFAULT_BEFORE_DATE,
     FILING_DETAILS_FILENAME_STEM,
     FILING_FULL_SUBMISSION_FILENAME,
     MAX_REQUESTS_PER_SECOND,
@@ -24,16 +26,6 @@ from ._constants import (
     SEC_EDGAR_RATE_LIMIT_SLEEP_INTERVAL,
     SEC_EDGAR_SUBMISSIONS_API_BASE_URL,
     SUPPORTED_FORMS,
-)
-
-# Store metadata about filing to download
-FilingMetadata = namedtuple(
-    "FilingMetadata",
-    [
-        "full_submission_url",
-        "filing_details_url",
-        "filing_details_filename",
-    ],
 )
 
 # Rate limiter
@@ -122,31 +114,7 @@ def get_filings_to_download(
     filtered_submissions = filter_dataframe(
         submissions, forms, amount, start_date, end_date, include_amends
     )
-
     return filtered_submissions
-
-
-def get_filing_metadata_from_df_row(cik: str, filing: Tuple[Any]) -> FilingMetadata:
-    accession_number_no_dashes = filing.accessionNumber.replace("-", "", 2)
-
-    submission_base_url = (
-        f"{SEC_EDGAR_ARCHIVES_BASE_URL}/{cik}/{accession_number_no_dashes}"
-    )
-
-    full_submission_url = f"{submission_base_url}/{filing.accessionNumber}.txt"
-
-    filing_details_url = filing_details_filename = None
-
-    if filing.primaryDocument:
-        filing_details_url = f"{submission_base_url}/{filing.primaryDocument}"
-        file_extension = Path(filing.primaryDocument).suffix.replace("htm", "html")
-        filing_details_filename = f"{FILING_DETAILS_FILENAME_STEM}{file_extension}"
-
-    return FilingMetadata(
-        full_submission_url=full_submission_url,
-        filing_details_url=filing_details_url,
-        filing_details_filename=filing_details_filename,
-    )
 
 
 def filter_dataframe(
@@ -166,22 +134,53 @@ def filter_dataframe(
         # Exclude filing amends
         mask &= ~submissions.primaryDocDescription.str.endswith("/A")
 
-    return submissions[mask] if amount is None else submissions[mask][:amount]
+    if amount is None:
+        # Download all submissions after applying mask
+        filtered_submissions = submissions[mask]
+    else:
+        # Download the first n number of forms after applying mask
+        # For example: Select forms 6-K, 8-K, and 10-K and specify the
+        # amount to be 3. If the submissions with mask contains 15
+        # filings (5 of each form type), applying the following query
+        # will download a total of 9 filings, 3 of each form type.
+        filtered_submissions = submissions[mask].groupby("form").head(amount)
+
+    return filtered_submissions.reset_index()
 
 
-# def form_download_urls(cik: str, filings_to_download: pd.DataFrame) -> pd.DataFrame:
-#     defaultdict(list)
-#     for filing in filings_to_download.itertuples():
-#         metadata = get_filing_metadata_from_df_row(cik, filing)
-#     pass
+def get_download_urls(cik: str, filings_to_download: pd.DataFrame) -> pd.DataFrame:
+    download_urls = defaultdict(list)
+    for filing in filings_to_download.itertuples():
+        download_urls["accessionNumber"].append(filing.accessionNumber)
+        download_urls["form"].append(filing.form)
+        download_urls["filingDate"].append(filing.filingDate)
+
+        accession_number_no_dashes = filing.accessionNumber.replace("-", "", 2)
+        submission_base_url = (
+            f"{SEC_EDGAR_ARCHIVES_BASE_URL}/{cik}/{accession_number_no_dashes}"
+        )
+
+        download_urls["fullSubmissionUrl"].append(
+            f"{submission_base_url}/{filing.accessionNumber}.txt"
+        )
+
+        if filing.primaryDocument:
+            primary_doc = Path(filing.primaryDocument)
+            download_urls["filingDetailsUrl"].append(
+                f"{submission_base_url}/{primary_doc.name}"
+            )
+        else:
+            download_urls["filingDetailsUrl"].append("")
+
+    return pd.DataFrame(download_urls)
 
 
 def download_filings(
     download_folder: Path,
     cik: str,
-    filings_to_download: pd.DataFrame,
+    download_urls_df: pd.DataFrame,
     include_filing_details: bool,
-) -> int:
+):
     client = requests.Session()
     client.headers.update(
         {
@@ -194,9 +193,7 @@ def download_filings(
     client.mount("https://", HTTPAdapter(max_retries=retries))
 
     try:
-        for filing in filings_to_download.itertuples():
-            metadata = get_filing_metadata_from_df_row(cik, filing)
-
+        for filing in download_urls_df.itertuples():
             try:
                 download_and_save_filing(
                     client,
@@ -204,7 +201,7 @@ def download_filings(
                     cik,
                     filing.accessionNumber,
                     filing.form,
-                    metadata.full_submission_url,
+                    filing.fullSubmissionUrl,
                     FILING_FULL_SUBMISSION_FILENAME,
                 )
             except requests.exceptions.HTTPError as e:  # pragma: no cover
@@ -213,7 +210,12 @@ def download_filings(
                     f"{filing.accessionNumber!r} due to network error: {e}."
                 )
 
-            if include_filing_details and metadata.filing_details_url is not None:
+            if include_filing_details and filing.filingDetailsUrl:
+                # Get filename from SEC URL in order to extract the appropriate extension
+                url_path = str(urlparse(filing.filingDetailsUrl).path)
+                sec_filename = url_path.rstrip("/").rsplit("/", 1).pop()
+                extension = Path(sec_filename).suffix.replace("htm", "html")
+                save_filename = f"{FILING_DETAILS_FILENAME_STEM}{extension}"
                 try:
                     download_and_save_filing(
                         client,
@@ -221,8 +223,8 @@ def download_filings(
                         cik,
                         filing.accessionNumber,
                         filing.form,
-                        metadata.filing_details_url,
-                        metadata.filing_details_filename,
+                        filing.filingDetailsUrl,
+                        save_filename,
                         resolve_urls=True,
                     )
                 except requests.exceptions.HTTPError as e:  # pragma: no cover
@@ -230,12 +232,13 @@ def download_filings(
                         f"Skipping filing detail download for "
                         f"{filing.accessionNumber!r} due to network error: {e}."
                     )
-        return filings_to_download.accessionNumber.nunique()
     finally:
         client.close()
 
 
-def resolve_relative_urls_in_filing(filing_text: bytes, download_url: str) -> Union[str, BeautifulSoup]:
+def resolve_relative_urls_in_filing(
+    filing_text: bytes, download_url: str
+) -> Union[str, BeautifulSoup]:
     soup = BeautifulSoup(filing_text, "lxml")
     base_url = f"{download_url.rsplit('/', 1)[0]}/"
 
@@ -304,3 +307,33 @@ def validate_forms(forms: List[str]) -> None:
             f"{','.join(unsupported_forms)!r} filings are not supported. "
             f"Please choose from the following: {filing_options}."
         )
+
+
+def validate_dates(
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Tuple[str, str]:
+    # SEC allows for filing searches from 1994 onwards
+    if start_date is None:
+        start_date = DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS)
+    else:
+        validate_date_format(start_date)
+
+        if start_date < DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS):
+            raise ValueError(
+                f"Filings cannot be downloaded prior to {DEFAULT_AFTER_DATE.year}. "
+                f"Please enter a date on or after {DEFAULT_AFTER_DATE}."
+            )
+
+    if end_date is None:
+        end_date = DEFAULT_BEFORE_DATE.strftime(DATE_FORMAT_TOKENS)
+    else:
+        validate_date_format(end_date)
+
+    if start_date > end_date:
+        raise ValueError(
+            "Invalid after and before date combination. "
+            "Please enter an after date that is less than the before date."
+        )
+
+    return start_date, end_date

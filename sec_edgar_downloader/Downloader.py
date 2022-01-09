@@ -1,19 +1,21 @@
 """Provides a :class:`Downloader` class for downloading SEC EDGAR filings."""
 
+from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, List, Optional, Union, Dict
+from typing import ClassVar, Dict, List, Optional, Union
 
-from ._constants import DATE_FORMAT_TOKENS, DEFAULT_AFTER_DATE, DEFAULT_BEFORE_DATE
+import pandas as pd
+from sec_cik_mapper import MutualFundMapper, StockMapper
+
 from ._constants import SUPPORTED_FORMS as _SUPPORTED_FORMS
 from ._utils import (
     download_filings,
+    get_download_urls,
     get_filings_to_download,
     is_cik,
-    validate_date_format,
+    validate_dates,
     validate_forms,
 )
-
-from sec_cik_mapper import StockMapper, MutualFundMapper
 
 
 class Downloader:
@@ -33,7 +35,7 @@ class Downloader:
         >>> dl = Downloader("/path/to/valid/save/location")
     """
 
-    ticker_to_cik_mapping: ClassVar[Dict[str, str]] = None
+    _ticker_to_cik_mapping: ClassVar[Dict[str, str]]
 
     supported_forms: ClassVar[List[str]] = sorted(_SUPPORTED_FORMS)
 
@@ -46,17 +48,23 @@ class Downloader:
         else:
             self.download_folder = Path(download_folder).expanduser().resolve()
 
-    def _convert_ticker_to_cik(self, ticker: str) -> str:
-        # Initialize and cache ticker_to_cik_mapping
-        if self.ticker_to_cik_mapping is None:
+        self._ticker_to_cik_mapping = None
+
+    @lru_cache
+    def _get_cik_cached(self, ticker: str) -> Optional[str]:
+        # Initialize and cache ticker to CIK mapping
+        if self._ticker_to_cik_mapping is None:
             stock_mapper = StockMapper()
             mutual_fund_mapper = MutualFundMapper()
-            self.ticker_to_cik_mapping = dict(
+            self._ticker_to_cik_mapping = dict(
                 stock_mapper.ticker_to_cik,
                 **mutual_fund_mapper.ticker_to_cik,
             )
 
-        cik = self.ticker_to_cik_mapping.get(ticker)
+        return self._ticker_to_cik_mapping.get(ticker)
+
+    def _convert_ticker_to_cik(self, ticker: str) -> str:
+        cik = self._get_cik_cached(ticker)
 
         if cik is None:
             raise ValueError(
@@ -66,6 +74,23 @@ class Downloader:
             )
 
         return cik
+
+    def _validate_ticker_or_cik(self, ticker_or_cik: str):
+        ticker_or_cik = str(ticker_or_cik).strip().upper()
+
+        # Check for blank tickers or CIKs
+        if not ticker_or_cik:
+            raise ValueError("Invalid ticker or CIK. Please enter a non-blank value.")
+
+        # Detect CIKs and ensure that they are properly zero-padded
+        if is_cik(ticker_or_cik):
+            if len(ticker_or_cik) > 10:
+                raise ValueError("Invalid CIK. CIKs must be at most 10 digits long.")
+            # Pad CIK with 0s to ensure that it is exactly 10 digits long
+            # The SEC EDGAR API requires zero-padded CIKs
+            return ticker_or_cik.zfill(10)
+
+        return self._convert_ticker_to_cik(ticker_or_cik)
 
     def get(
         self,
@@ -77,7 +102,8 @@ class Downloader:
         end_date: Optional[str] = None,
         include_amends: bool = True,
         download_details: bool = True,
-    ) -> int:
+        only_dataframe: bool = False,
+    ) -> pd.DataFrame:
         """Download filings and save them to disk.
 
         :param forms: filing types to download (e.g. 8-K, 10-K).
@@ -88,11 +114,16 @@ class Downloader:
             Defaults to 1994-01-01, the earliest date supported by EDGAR.
         :param end_date: end date of form YYYY-MM-DD before which to download filings.
             Defaults to today.
-        :param include_amends: denotes whether or not to include filing amends (e.g. 8-K/A).
+        :param include_amends: whether to include filing amends (e.g. 8-K/A).
             Defaults to True.
-        :param download_details: denotes whether or not to download human-readable and easily
+        :param download_details: whether to download human-readable and easily
             parseable filing detail documents (e.g. form 4 XML, 8-K HTML). Defaults to True.
-        :return: number of filings downloaded.
+        :param only_dataframe: return a dataframe containing data that matches the provided
+            parameters without downloading the filings to disk. Defaults to False.
+            By default, filings will be downloaded and the dataframe will be returned.
+
+        :return: pandas dataframe with the columns form, accessionNumber, filingDate,
+            fullSubmissionUrl, and filingDetailsUrl.
 
         Usage::
 
@@ -129,54 +160,23 @@ class Downloader:
             # Get all SD filings for Apple
             >>> dl.get("SD", "AAPL")
         """
-        ticker_or_cik = str(ticker_or_cik).strip().upper()
+        cik = self._validate_ticker_or_cik(ticker_or_cik)
 
-        # Check for blank tickers or CIKs
-        if not ticker_or_cik:
-            raise ValueError("Invalid ticker or CIK. Please enter a non-blank value.")
-
-        # Detect CIKs and ensure that they are properly zero-padded
-        if is_cik(ticker_or_cik):
-            if len(ticker_or_cik) > 10:
-                raise ValueError("Invalid CIK. CIKs must be at most 10 digits long.")
-            # Pad CIK with 0s to ensure that it is exactly 10 digits long
-            # The SEC EDGAR API requires zero-padded CIKs
-            cik = ticker_or_cik.zfill(10)
-        else:
-            cik = self._convert_ticker_to_cik(ticker_or_cik)
-
+        # If amount is not specified, download all available filings
+        # for the specified input parameters.
+        # Else, we need to ensure that the specified amount is valid.
         if amount is not None:
             amount = max(int(amount), 1)
 
-        # SEC allows for filing searches from 1994 onwards
-        if start_date is None:
-            start_date = DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS)
-        else:
-            validate_date_format(start_date)
-
-            if start_date < DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS):
-                raise ValueError(
-                    f"Filings cannot be downloaded prior to {DEFAULT_AFTER_DATE.year}. "
-                    f"Please enter a date on or after {DEFAULT_AFTER_DATE}."
-                )
-
-        if end_date is None:
-            end_date = DEFAULT_BEFORE_DATE.strftime(DATE_FORMAT_TOKENS)
-        else:
-            validate_date_format(end_date)
-
-        if start_date > end_date:
-            raise ValueError(
-                "Invalid after and before date combination. "
-                "Please enter an after date that is less than the before date."
-            )
+        # Validate start and end dates and set defaults if None
+        start_date, end_date = validate_dates(start_date, end_date)
 
         if isinstance(forms, str):
             forms = [forms]
 
         validate_forms(forms)
 
-        filings_to_download = get_filings_to_download(
+        filings_df = get_filings_to_download(
             forms,
             cik,
             amount,
@@ -185,11 +185,14 @@ class Downloader:
             include_amends,
         )
 
-        num_unique_filings_downloaded = download_filings(
-            self.download_folder,
-            cik,
-            filings_to_download,
-            download_details,
-        )
+        download_urls_df = get_download_urls(cik, filings_df)
 
-        return num_unique_filings_downloaded
+        if not only_dataframe:
+            download_filings(
+                self.download_folder,
+                cik,
+                download_urls_df,
+                download_details,
+            )
+
+        return download_urls_df
