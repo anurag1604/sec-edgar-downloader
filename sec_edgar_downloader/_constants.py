@@ -1,7 +1,6 @@
 """Constants used throughout the package."""
 
 from datetime import date
-
 from typing import Set
 
 from typing_extensions import Final

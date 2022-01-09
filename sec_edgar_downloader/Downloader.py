@@ -1,21 +1,13 @@
 """Provides a :class:`Downloader` class for downloading SEC EDGAR filings."""
 
-from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, Dict, List, Optional, Union
+from typing import ClassVar, List, Optional, Union
 
 import pandas as pd
-from sec_cik_mapper import MutualFundMapper, StockMapper
 
 from ._constants import SUPPORTED_FORMS as _SUPPORTED_FORMS
-from ._utils import (
-    download_filings,
-    get_download_urls,
-    get_filings_to_download,
-    is_cik,
-    validate_dates,
-    validate_forms,
-)
+from ._utils import download_filings, get_download_urls, get_filings_to_download
+from ._validation import validate_dates, validate_forms, validate_ticker_or_cik
 
 
 class Downloader:
@@ -35,8 +27,6 @@ class Downloader:
         >>> dl = Downloader("/path/to/valid/save/location")
     """
 
-    _ticker_to_cik_mapping: ClassVar[Dict[str, str]]
-
     supported_forms: ClassVar[List[str]] = sorted(_SUPPORTED_FORMS)
 
     def __init__(self, download_folder: Union[str, Path, None] = None) -> None:
@@ -47,50 +37,6 @@ class Downloader:
             self.download_folder = download_folder
         else:
             self.download_folder = Path(download_folder).expanduser().resolve()
-
-        self._ticker_to_cik_mapping = None
-
-    @lru_cache
-    def _get_cik_cached(self, ticker: str) -> Optional[str]:
-        # Initialize and cache ticker to CIK mapping
-        if self._ticker_to_cik_mapping is None:
-            stock_mapper = StockMapper()
-            mutual_fund_mapper = MutualFundMapper()
-            self._ticker_to_cik_mapping = dict(
-                stock_mapper.ticker_to_cik,
-                **mutual_fund_mapper.ticker_to_cik,
-            )
-
-        return self._ticker_to_cik_mapping.get(ticker)
-
-    def _convert_ticker_to_cik(self, ticker: str) -> str:
-        cik = self._get_cik_cached(ticker)
-
-        if cik is None:
-            raise ValueError(
-                f"Unable to convert the ticker {ticker!r} to a CIK. "
-                "Please use the official SEC CIK lookup tool to find the CIK and retry the download: "
-                "sec.gov/edgar/searchedgar/cik.htm"
-            )
-
-        return cik
-
-    def _validate_ticker_or_cik(self, ticker_or_cik: str):
-        ticker_or_cik = str(ticker_or_cik).strip().upper()
-
-        # Check for blank tickers or CIKs
-        if not ticker_or_cik:
-            raise ValueError("Invalid ticker or CIK. Please enter a non-blank value.")
-
-        # Detect CIKs and ensure that they are properly zero-padded
-        if is_cik(ticker_or_cik):
-            if len(ticker_or_cik) > 10:
-                raise ValueError("Invalid CIK. CIKs must be at most 10 digits long.")
-            # Pad CIK with 0s to ensure that it is exactly 10 digits long
-            # The SEC EDGAR API requires zero-padded CIKs
-            return ticker_or_cik.zfill(10)
-
-        return self._convert_ticker_to_cik(ticker_or_cik)
 
     def get(
         self,
@@ -160,7 +106,7 @@ class Downloader:
             # Get all SD filings for Apple
             >>> dl.get("SD", "AAPL")
         """
-        cik = self._validate_ticker_or_cik(ticker_or_cik)
+        cik = validate_ticker_or_cik(ticker_or_cik)
 
         # If amount is not specified, download all available filings
         # for the specified input parameters.

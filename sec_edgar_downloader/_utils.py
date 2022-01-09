@@ -1,8 +1,7 @@
 """Utility functions for the downloader class."""
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 from urllib.parse import urljoin, urlparse
 
 import pandas as pd
@@ -14,9 +13,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from ._constants import (
-    DATE_FORMAT_TOKENS,
-    DEFAULT_AFTER_DATE,
-    DEFAULT_BEFORE_DATE,
     FILING_DETAILS_FILENAME_STEM,
     FILING_FULL_SUBMISSION_FILENAME,
     MAX_REQUESTS_PER_SECOND,
@@ -25,7 +21,6 @@ from ._constants import (
     SEC_EDGAR_ARCHIVES_BASE_URL,
     SEC_EDGAR_RATE_LIMIT_SLEEP_INTERVAL,
     SEC_EDGAR_SUBMISSIONS_API_BASE_URL,
-    SUPPORTED_FORMS,
 )
 
 # Rate limiter
@@ -42,19 +37,6 @@ retries = Retry(
     backoff_factor=SEC_EDGAR_RATE_LIMIT_SLEEP_INTERVAL,
     status_forcelist=[403, 500, 502, 503, 504],
 )
-
-
-def validate_date_format(date_format: str) -> None:
-    error_msg_base = "Please enter a date string of the form YYYY-MM-DD."
-
-    if not isinstance(date_format, str):
-        raise TypeError(error_msg_base)
-
-    try:
-        datetime.strptime(date_format, DATE_FORMAT_TOKENS)
-    except ValueError as exc:
-        # Re-raise with custom error message
-        raise ValueError(f"Incorrect date format. {error_msg_base}") from exc
 
 
 @limiter.ratelimit(delay=True)
@@ -289,51 +271,3 @@ def download_and_save_filing(
 
 def generate_random_user_agent() -> str:
     return f"{fake.first_name()} {fake.last_name()} {fake.email()}"
-
-
-def is_cik(ticker_or_cik: str) -> bool:
-    try:
-        int(ticker_or_cik)
-        return True
-    except ValueError:
-        return False
-
-
-def validate_forms(forms: List[str]) -> None:
-    unsupported_forms = set(forms) - SUPPORTED_FORMS
-    if unsupported_forms:
-        filing_options = ", ".join(sorted(SUPPORTED_FORMS))
-        raise ValueError(
-            f"{','.join(unsupported_forms)!r} filings are not supported. "
-            f"Please choose from the following: {filing_options}."
-        )
-
-
-def validate_dates(
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> Tuple[str, str]:
-    # SEC allows for filing searches from 1994 onwards
-    if start_date is None:
-        start_date = DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS)
-    else:
-        validate_date_format(start_date)
-
-        if start_date < DEFAULT_AFTER_DATE.strftime(DATE_FORMAT_TOKENS):
-            raise ValueError(
-                f"Filings cannot be downloaded prior to {DEFAULT_AFTER_DATE.year}. "
-                f"Please enter a date on or after {DEFAULT_AFTER_DATE}."
-            )
-
-    if end_date is None:
-        end_date = DEFAULT_BEFORE_DATE.strftime(DATE_FORMAT_TOKENS)
-    else:
-        validate_date_format(end_date)
-
-    if start_date > end_date:
-        raise ValueError(
-            "Invalid after and before date combination. "
-            "Please enter an after date that is less than the before date."
-        )
-
-    return start_date, end_date
