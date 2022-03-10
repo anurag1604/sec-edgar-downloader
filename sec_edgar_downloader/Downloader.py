@@ -180,13 +180,13 @@ class Downloader:
             query,
         )
 
-        download_filings(
-            self.download_folder,
-            ticker_or_cik,
-            filing,
-            filings_to_fetch,
-            download_details,
-        )
+        #download_filings(
+        #    self.download_folder,
+        #    ticker_or_cik,
+        #    filing,
+        #    filings_to_fetch,
+        #    download_details,
+        #)
 
         # Get number of unique accession numbers downloaded
-        return get_number_of_unique_filings(filings_to_fetch)
+        return get_number_of_unique_filings(filings_to_fetch), filings_to_fetch
